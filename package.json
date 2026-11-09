@@ -1,0 +1,29 @@
+{
+  "name": "codeops-ai",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+ "scripts": {
+  "dev": "tsx src/index.ts",
+  "build": "tsc",
+  "test": "vitest run"
+},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aryanpratap9835/Codeops-ai.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Aryanpratap9835/Codeops-ai/issues"
+  },
+  "homepage": "https://github.com/Aryanpratap9835/Codeops-ai#readme",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.0",
+    "vitest": "^5.1.0"
+  }
+}
