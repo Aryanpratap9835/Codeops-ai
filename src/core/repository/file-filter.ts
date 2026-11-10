@@ -14,5 +14,5 @@ export function shouldIgnore(name: string): boolean {
 }
 export function shouldTake(name: string): boolean {
     const ext = path.extname(name);
-    return ext.includes(ext)
+    return extension.includes(ext)
 }

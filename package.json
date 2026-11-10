@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
- "scripts": {
-  "dev": "tsx src/index.ts",
-  "build": "tsc",
-  "test": "vitest run"
-},
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "test": "vitest run"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Aryanpratap9835/Codeops-ai.git"
@@ -23,7 +23,7 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
-    "typescript": "^5.7.0",
+    "typescript": "^5.9.3",
     "vitest": "^5.1.0"
   }
 }
