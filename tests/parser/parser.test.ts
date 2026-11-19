@@ -1,18 +1,18 @@
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { test, expect, onTestFinished } from "vitest";
 
 import { parseRepository } from "../../src/core/parser/parser";
 
-test("parser extracts functions, classes, imports, exports and calls", async (t) => {
+test("parser extracts functions, classes, imports, exports and calls", async () => {
     const root = await fs.mkdtemp(
         path.join(os.tmpdir(), "codeops-parser-")
     );
 
-    t.after(async () => {
+    onTestFinished(async () => {
         await fs.rm(root, { recursive: true, force: true });
     });
 
@@ -129,12 +129,12 @@ test("parser reports unsupported file extensions", async () => {
     }
 });
 
-test("parser reports files that cannot be read", async (t) => {
+test("parser reports files that cannot be read", async () => {
     const root = await fs.mkdtemp(
         path.join(os.tmpdir(), "codeops-parser-")
     );
 
-    t.after(async () => {
+    onTestFinished(async () => {
         await fs.rm(root, { recursive: true, force: true });
     });
 

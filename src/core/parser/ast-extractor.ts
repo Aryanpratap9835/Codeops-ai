@@ -1,5 +1,6 @@
 
 import ts from "typescript";
+import { extractSymbols } from "./symbol-extractor";
 
 import {
     CallInfo,
@@ -333,6 +334,7 @@ export function extractAST(
     sourceFile: ts.SourceFile,
     filePath: string
 ): ParsedFile {
+
     const functions: FunctionInfo[] = [];
     const classes: ClassInfo[] = [];
     const imports: ImportInfo[] = [];
@@ -345,6 +347,8 @@ export function extractAST(
     extractExports(sourceFile, exports);
     extractCalls(sourceFile, calls);
 
+    const symbols = extractSymbols(sourceFile, filePath);
+
     return {
         filePath,
         functions,
@@ -352,6 +356,7 @@ export function extractAST(
         imports,
         exports,
         calls,
+        symbols,
         diagnostics: extractDiagnostics(sourceFile)
     };
 }

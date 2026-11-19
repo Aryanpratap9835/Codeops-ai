@@ -63,16 +63,6 @@ export interface ParseDiagnostic {
     location: SourceLocation | null;
 }
 
-export interface ParsedFile {
-    filePath: string;
-    functions: FunctionInfo[];
-    classes: ClassInfo[];
-    imports: ImportInfo[];
-    exports: ExportInfo[];
-    calls: CallInfo[];
-    diagnostics: ParseDiagnostic[];
-}
-
 export interface ParseError {
     filePath: string;
     code: string;
@@ -82,4 +72,31 @@ export interface ParseError {
 export interface ParseResult {
     files: ParsedFile[];
     errors: ParseError[];
+}
+
+export type SymbolKind =
+    | "function"
+    | "class"
+    | "method"
+    | "property";
+
+export interface SymbolInfo {
+    id: string;
+    name: string;
+    qualifiedName: string;
+    kind: SymbolKind;
+    filePath: string;
+    location: SourceLocation;
+    exported: boolean;
+    parentId: string | null;
+}
+export interface ParsedFile {
+    filePath: string;
+    functions: FunctionInfo[];
+    classes: ClassInfo[];
+    imports: ImportInfo[];
+    exports: ExportInfo[];
+    calls: CallInfo[];
+    symbols: SymbolInfo[];
+    diagnostics: ParseDiagnostic[];
 }

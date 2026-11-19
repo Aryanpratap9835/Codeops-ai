@@ -1,20 +1,19 @@
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-
+import { test, expect, onTestFinished } from "vitest";
 import { scanRepository } from "../../src/core/repository/scanner";
 
 // TEST 1: Normal scanning and ignored directories
-test("scanner handles temporary repository and ignores unwanted directories", async (t) => {
+test("scanner handles temporary repository and ignores unwanted directories", async () => {
 
     const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), "codeops-test-")
     );
 
-    t.after(async () => {
+    onTestFinished(async () => {
         await fs.rm(tempDir, {
             recursive: true,
             force: true
