@@ -1,79 +1,43 @@
-
 import ts from "typescript";
 import { extractSymbols } from "./symbol-extractor";
-
 import {
-    CallInfo,
-    ClassInfo,
-    ExportInfo,
-    FunctionInfo,
-    ImportInfo,
-    ParseDiagnostic,
-    ParsedFile,
-    PropertyInfo,
-    SourceLocation
+    CallInfo, ClassInfo, ExportInfo, FunctionInfo, ImportInfo,
+    ParseDiagnostic, ParsedFile, PropertyInfo, SourceLocation, SymbolInfo
 } from "./parser-types";
 
-function getLocation(
-    node: ts.Node,
-    sourceFile: ts.SourceFile
-): SourceLocation {
+function getLocation(node: ts.Node, sourceFile: ts.SourceFile): SourceLocation {
     const start = node.getStart(sourceFile);
-    const end = node.getEnd();
     const position = sourceFile.getLineAndCharacterOfPosition(start);
-
-    return {
-        line: position.line + 1,
-        column: position.character + 1,
-        start,
-        end
-    };
+    return { line: position.line + 1, column: position.character + 1, start, end: node.getEnd() };
 }
 
 function getNodeName(node: ts.Node): string {
-    return ts.isIdentifier(node) ||
-        ts.isStringLiteral(node) ||
-        ts.isNumericLiteral(node)
-        ? node.text
-        : node.getText();
+    return ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNumericLiteral(node)
+        ? node.text : node.getText();
+}
+
+function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
+    const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
+    return modifiers?.some(modifier => modifier.kind === kind) ?? false;
 }
 
 function hasExportModifier(node: ts.Node): boolean {
-    const modifiers = ts.canHaveModifiers(node)
-        ? ts.getModifiers(node)
-        : undefined;
-
-    return modifiers?.some(
-        modifier => modifier.kind === ts.SyntaxKind.ExportKeyword
-    ) ?? false;
+    return hasModifier(node, ts.SyntaxKind.ExportKeyword);
 }
 
 function hasDefaultModifier(node: ts.Node): boolean {
-    const modifiers = ts.canHaveModifiers(node)
-        ? ts.getModifiers(node)
-        : undefined;
-
-    return modifiers?.some(
-        modifier => modifier.kind === ts.SyntaxKind.DefaultKeyword
-    ) ?? false;
+    return hasModifier(node, ts.SyntaxKind.DefaultKeyword);
 }
 
-function getParameters(
-    parameters: ts.NodeArray<ts.ParameterDeclaration>
-): string[] {
+function getParameters(parameters: ts.NodeArray<ts.ParameterDeclaration>): string[] {
     return parameters.map(parameter => parameter.name.getText());
 }
 
-function getReturnType(
-    node: ts.SignatureDeclaration
-): string | null {
+function getReturnType(node: ts.SignatureDeclaration): string | null {
     return node.type?.getText() ?? null;
 }
 
-function extractFunctions(
-    sourceFile: ts.SourceFile,
-    functions: FunctionInfo[]
-): void {
+function extractFunctions(sourceFile: ts.SourceFile, functions: FunctionInfo[]): void {
     function visit(node: ts.Node): void {
         if (ts.isFunctionDeclaration(node)) {
             functions.push({
@@ -89,22 +53,18 @@ function extractFunctions(
         if (
             ts.isVariableDeclaration(node) &&
             node.initializer &&
-            (ts.isArrowFunction(node.initializer) ||
-                ts.isFunctionExpression(node.initializer))
+            (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
         ) {
             const initializer = node.initializer;
-
+            const list = node.parent;
+            const statement = ts.isVariableDeclarationList(list) ? list.parent : undefined;
             functions.push({
                 name: getNodeName(node.name),
-                kind: ts.isArrowFunction(initializer)
-                    ? "arrow"
-                    : "function-expression",
+                kind: ts.isArrowFunction(initializer) ? "arrow" : "function-expression",
                 parameters: getParameters(initializer.parameters),
                 returnType: getReturnType(initializer),
                 location: getLocation(node, sourceFile),
-                exported: hasExportModifier(
-                    node.parent.parent.parent
-                )
+                exported: !!statement && ts.isVariableStatement(statement) && hasExportModifier(statement)
             });
         }
 
@@ -121,24 +81,16 @@ function extractFunctions(
 
         ts.forEachChild(node, visit);
     }
-
     visit(sourceFile);
 }
 
-function extractClasses(
-    sourceFile: ts.SourceFile,
-    classes: ClassInfo[]
-): void {
+function extractClasses(sourceFile: ts.SourceFile, classes: ClassInfo[]): void {
     function visit(node: ts.Node): void {
         if (ts.isClassDeclaration(node)) {
             const methods: string[] = [];
             const properties: PropertyInfo[] = [];
-
             for (const member of node.members) {
-                if (ts.isMethodDeclaration(member)) {
-                    methods.push(getNodeName(member.name));
-                }
-
+                if (ts.isMethodDeclaration(member)) methods.push(getNodeName(member.name));
                 if (ts.isPropertyDeclaration(member)) {
                     properties.push({
                         name: getNodeName(member.name),
@@ -147,7 +99,6 @@ function extractClasses(
                     });
                 }
             }
-
             classes.push({
                 name: node.name?.text ?? "anonymous",
                 methods,
@@ -156,42 +107,31 @@ function extractClasses(
                 exported: hasExportModifier(node)
             });
         }
-
         ts.forEachChild(node, visit);
     }
-
     visit(sourceFile);
 }
 
-function extractImports(
-    sourceFile: ts.SourceFile,
-    imports: ImportInfo[]
-): void {
+function extractImports(sourceFile: ts.SourceFile, imports: ImportInfo[]): void {
     for (const statement of sourceFile.statements) {
-        if (!ts.isImportDeclaration(statement)) {
-            continue;
-        }
-
-        if (!ts.isStringLiteral(statement.moduleSpecifier)) {
-            continue;
-        }
-
+        if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
         const clause = statement.importClause;
-
         let defaultImport: string | null = null;
         let namespaceImport: string | null = null;
-        let namedImports: string[] = [];
+        const namedImportBindings: NonNullable<ImportInfo["namedImportBindings"]> = [];
 
         if (clause) {
             defaultImport = clause.name?.text ?? null;
-
             if (clause.namedBindings) {
                 if (ts.isNamespaceImport(clause.namedBindings)) {
                     namespaceImport = clause.namedBindings.name.text;
                 } else {
-                    namedImports = clause.namedBindings.elements.map(
-                        element => element.name.text
-                    );
+                    for (const element of clause.namedBindings.elements) {
+                        namedImportBindings.push({
+                            importedName: (element.propertyName ?? element.name).text,
+                            localName: element.name.text
+                        });
+                    }
                 }
             }
         }
@@ -200,32 +140,25 @@ function extractImports(
             moduleSpecifier: statement.moduleSpecifier.text,
             defaultImport,
             namespaceImport,
-            namedImports,
+            namedImports: namedImportBindings.map(binding => binding.localName),
+            namedImportBindings,
             isTypeOnly: clause?.isTypeOnly ?? false,
             location: getLocation(statement, sourceFile)
         });
     }
 }
 
-function extractExports(
-    sourceFile: ts.SourceFile,
-    exports: ExportInfo[]
-): void {
+function extractExports(sourceFile: ts.SourceFile, exports: ExportInfo[]): void {
     for (const statement of sourceFile.statements) {
         if (ts.isExportDeclaration(statement)) {
-            const moduleSpecifier =
-                statement.moduleSpecifier &&
-                    ts.isStringLiteral(statement.moduleSpecifier)
-                    ? statement.moduleSpecifier.text
-                    : null;
+            const moduleSpecifier = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)
+                ? statement.moduleSpecifier.text : null;
 
-            if (
-                statement.exportClause &&
-                ts.isNamedExports(statement.exportClause)
-            ) {
+            if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
                 for (const element of statement.exportClause.elements) {
                     exports.push({
                         name: element.name.text,
+                        localName: (element.propertyName ?? element.name).text,
                         kind: "re-export",
                         isDefault: false,
                         moduleSpecifier,
@@ -234,39 +167,30 @@ function extractExports(
                 }
             } else {
                 exports.push({
-                    name: "*",
-                    kind: "export-all",
-                    isDefault: false,
-                    moduleSpecifier,
-                    location: getLocation(statement, sourceFile)
+                    name: "*", localName: null, kind: "export-all",
+                    isDefault: false, moduleSpecifier, location: getLocation(statement, sourceFile)
                 });
             }
-
             continue;
         }
 
         if (ts.isExportAssignment(statement)) {
             exports.push({
-                name: "default",
-                kind: "default-export",
-                isDefault: true,
-                moduleSpecifier: null,
-                location: getLocation(statement, sourceFile)
+                name: "default", localName: null, kind: "default-export",
+                isDefault: true, moduleSpecifier: null, location: getLocation(statement, sourceFile)
             });
-
             continue;
         }
 
         if (hasExportModifier(statement)) {
             const nameNode = "name" in statement ? (statement.name as ts.Node | undefined) : undefined;
-            const name = nameNode && ts.isIdentifier(nameNode)
-                ? nameNode.text
-                : "default";
-
+            const localName = nameNode ? getNodeName(nameNode) : null;
+            const isDefault = hasDefaultModifier(statement);
             exports.push({
-                name,
+                name: isDefault ? "default" : (localName ?? "default"),
+                localName,
                 kind: ts.SyntaxKind[statement.kind],
-                isDefault: hasDefaultModifier(statement),
+                isDefault,
                 moduleSpecifier: null,
                 location: getLocation(statement, sourceFile)
             });
@@ -274,89 +198,94 @@ function extractExports(
     }
 }
 
-function extractCalls(
-    sourceFile: ts.SourceFile,
-    calls: CallInfo[]
-): void {
-    function visit(node: ts.Node): void {
+function getCalleeKind(expression: ts.Expression): CallInfo["calleeKind"] {
+    if (ts.isIdentifier(expression)) return "identifier";
+    if (ts.isPropertyAccessExpression(expression)) return "property";
+    if (ts.isElementAccessExpression(expression)) return "element";
+    return "other";
+}
+
+function extractCalls(sourceFile: ts.SourceFile, calls: CallInfo[], symbols: SymbolInfo[]): void {
+    const symbolsByStart = new Map<number, SymbolInfo>();
+    for (const symbol of symbols) symbolsByStart.set(symbol.location.start, symbol);
+
+    function visit(node: ts.Node, currentCaller: SymbolInfo | null): void {
+        let activeCaller = currentCaller;
+
+        if (
+            ts.isFunctionDeclaration(node) ||
+            ts.isMethodDeclaration(node) ||
+            ts.isArrowFunction(node) ||
+            ts.isFunctionExpression(node)
+        ) {
+            const parent = node.parent;
+            const symbolStart =
+                (ts.isVariableDeclaration(parent) && parent.initializer === node)
+                    ? parent.getStart(sourceFile)
+                    : node.getStart(sourceFile);
+            const candidate = symbolsByStart.get(symbolStart);
+            if (candidate && (candidate.kind === "function" || candidate.kind === "method")) {
+                activeCaller = candidate;
+            }
+        }
+
         if (ts.isCallExpression(node)) {
             calls.push({
+                callerId: activeCaller?.id ?? null,
+                callerName: activeCaller?.name ?? null,
+                callerQualifiedName: activeCaller?.qualifiedName ?? null,
                 callee: node.expression.getText(sourceFile),
+                calleeKind: getCalleeKind(node.expression),
+                isOptional: node.questionDotToken !== undefined,
                 location: getLocation(node, sourceFile)
             });
         }
 
-        ts.forEachChild(node, visit);
+        ts.forEachChild(node, child => visit(child, activeCaller));
     }
-
-    visit(sourceFile);
+    visit(sourceFile, null);
 }
 
-function extractDiagnostics(
-    sourceFile: ts.SourceFile
-): ParseDiagnostic[] {
-    const diagnostics = (
-        sourceFile as ts.SourceFile & {
-            parseDiagnostics: readonly ts.Diagnostic[];
-        }
-    ).parseDiagnostics;
+function extractDiagnostics(sourceFile: ts.SourceFile): ParseDiagnostic[] {
+    const diagnostics = (sourceFile as ts.SourceFile & {
+        parseDiagnostics: readonly ts.Diagnostic[];
+    }).parseDiagnostics;
 
     return diagnostics.map(diagnostic => {
         let location: SourceLocation | null = null;
-
         if (diagnostic.start !== undefined) {
-            const position =
-                sourceFile.getLineAndCharacterOfPosition(
-                    diagnostic.start
-                );
-
+            const position = sourceFile.getLineAndCharacterOfPosition(diagnostic.start);
             location = {
                 line: position.line + 1,
                 column: position.character + 1,
                 start: diagnostic.start,
-                end: diagnostic.start +
-                    (diagnostic.length ?? 0)
+                end: diagnostic.start + (diagnostic.length ?? 0)
             };
         }
-
         return {
             code: diagnostic.code,
-            message: ts.flattenDiagnosticMessageText(
-                diagnostic.messageText,
-                "\n"
-            ),
+            message: ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
             location
         };
     });
 }
 
-export function extractAST(
-    sourceFile: ts.SourceFile,
-    filePath: string
-): ParsedFile {
-
+export function extractAST(sourceFile: ts.SourceFile, filePath: string): ParsedFile {
     const functions: FunctionInfo[] = [];
     const classes: ClassInfo[] = [];
     const imports: ImportInfo[] = [];
     const exports: ExportInfo[] = [];
     const calls: CallInfo[] = [];
+    const symbols = extractSymbols(sourceFile, filePath);
 
     extractFunctions(sourceFile, functions);
     extractClasses(sourceFile, classes);
     extractImports(sourceFile, imports);
     extractExports(sourceFile, exports);
-    extractCalls(sourceFile, calls);
-
-    const symbols = extractSymbols(sourceFile, filePath);
+    extractCalls(sourceFile, calls, symbols);
 
     return {
-        filePath,
-        functions,
-        classes,
-        imports,
-        exports,
-        calls,
-        symbols,
+        filePath, functions, classes, imports, exports, calls, symbols,
         diagnostics: extractDiagnostics(sourceFile)
     };
 }

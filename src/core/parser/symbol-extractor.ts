@@ -1,65 +1,38 @@
-
 import ts from "typescript";
+import { SourceLocation, SymbolInfo, SymbolKind } from "./parser-types";
 
-import {
-    SymbolInfo,
-    SymbolKind,
-    SourceLocation
-} from "./parser-types";
-
-function getLocation(
-    node: ts.Node,
-    sourceFile: ts.SourceFile
-): SourceLocation {
+function getLocation(node: ts.Node, sourceFile: ts.SourceFile): SourceLocation {
     const start = node.getStart(sourceFile);
-    const end = node.getEnd();
-    const position =
-        sourceFile.getLineAndCharacterOfPosition(start);
-
+    const position = sourceFile.getLineAndCharacterOfPosition(start);
     return {
         line: position.line + 1,
         column: position.character + 1,
         start,
-        end
+        end: node.getEnd()
     };
 }
 
 function getName(node: ts.Node): string {
-    if (
-        ts.isIdentifier(node) ||
-        ts.isStringLiteral(node) ||
-        ts.isNumericLiteral(node)
-    ) {
+    if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNumericLiteral(node)) {
         return node.text;
     }
-
     return node.getText();
 }
 
 function hasExportModifier(node: ts.Node): boolean {
-    const modifiers = ts.canHaveModifiers(node)
-        ? ts.getModifiers(node)
-        : undefined;
-
-    return modifiers?.some(
-        modifier =>
-            modifier.kind === ts.SyntaxKind.ExportKeyword
-    ) ?? false;
+    const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
+    return modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
 }
 
-function isVariableExported(
-    declaration: ts.VariableDeclaration
-): boolean {
-    const declarationList = declaration.parent;
+function isVariableExported(declaration: ts.VariableDeclaration): boolean {
+    const list = declaration.parent;
+    if (!ts.isVariableDeclarationList(list)) return false;
+    const statement = list.parent;
+    return ts.isVariableStatement(statement) && hasExportModifier(statement);
+}
 
-    if (!ts.isVariableDeclarationList(declarationList)) {
-        return false;
-    }
-
-    const statement = declarationList.parent;
-
-    return ts.isVariableStatement(statement) &&
-        hasExportModifier(statement);
+function isFunctionLikeExpression(node: ts.Node): node is ts.ArrowFunction | ts.FunctionExpression {
+    return ts.isArrowFunction(node) || ts.isFunctionExpression(node);
 }
 
 function createSymbol(
@@ -73,11 +46,7 @@ function createSymbol(
     exported: boolean
 ): SymbolInfo {
     const location = getLocation(node, sourceFile);
-
-    const qualifiedName = parentQualifiedName
-        ? `${parentQualifiedName}.${name}`
-        : name;
-
+    const qualifiedName = parentQualifiedName ? `${parentQualifiedName}.${name}` : name;
     return {
         id: `${filePath}:${kind}:${location.start}`,
         name,
@@ -90,10 +59,7 @@ function createSymbol(
     };
 }
 
-export function extractSymbols(
-    sourceFile: ts.SourceFile,
-    filePath: string
-): SymbolInfo[] {
+export function extractSymbols(sourceFile: ts.SourceFile, filePath: string): SymbolInfo[] {
     const symbols: SymbolInfo[] = [];
 
     function visit(
@@ -101,163 +67,84 @@ export function extractSymbols(
         parentId: string | null = null,
         parentQualifiedName: string | null = null
     ): void {
-
-        // 1. Class declarations
         if (ts.isClassDeclaration(node)) {
             const symbol = createSymbol(
                 node.name?.text ?? "anonymous",
-                "class",
-                filePath,
-                node,
-                sourceFile,
-                parentId,
-                parentQualifiedName,
-                hasExportModifier(node)
+                "class", filePath, node, sourceFile,
+                parentId, parentQualifiedName, hasExportModifier(node)
             );
-
             symbols.push(symbol);
-
             for (const member of node.members) {
-                visit(
-                    member,
-                    symbol.id,
-                    symbol.qualifiedName
-                );
+                visit(member, symbol.id, symbol.qualifiedName);
             }
-
             return;
         }
 
-        // 2. Function declarations
         if (ts.isFunctionDeclaration(node)) {
             const symbol = createSymbol(
-                node.name?.text ?? "anonymous",
-                "function",
-                filePath,
-                node,
-                sourceFile,
-                parentId,
-                parentQualifiedName,
-                hasExportModifier(node)
+                node.name?.text ?? `anonymous@${getLocation(node, sourceFile).line}`,
+                "function", filePath, node, sourceFile,
+                parentId, parentQualifiedName, hasExportModifier(node)
             );
-
             symbols.push(symbol);
-
-            ts.forEachChild(
-                node,
-                child => visit(
-                    child,
-                    symbol.id,
-                    symbol.qualifiedName
-                )
-            );
-
+            ts.forEachChild(node, child => visit(child, symbol.id, symbol.qualifiedName));
             return;
         }
 
-        // 3. Arrow functions and function expressions
+        if (ts.isMethodDeclaration(node)) {
+            const symbol = createSymbol(
+                getName(node.name), "method", filePath, node, sourceFile,
+                parentId, parentQualifiedName, false
+            );
+            symbols.push(symbol);
+            ts.forEachChild(node, child => visit(child, symbol.id, symbol.qualifiedName));
+            return;
+        }
+
         if (
             ts.isVariableDeclaration(node) &&
             node.initializer &&
-            (
-                ts.isArrowFunction(node.initializer) ||
-                ts.isFunctionExpression(node.initializer)
-            )
+            isFunctionLikeExpression(node.initializer)
         ) {
-            const initializer = node.initializer;
-
             const symbol = createSymbol(
-                getName(node.name),
-                "function",
-                filePath,
-                node,
-                sourceFile,
-                parentId,
-                parentQualifiedName,
-                isVariableExported(node)
+                getName(node.name), "function", filePath, node, sourceFile,
+                parentId, parentQualifiedName, isVariableExported(node)
             );
-
             symbols.push(symbol);
-
-            ts.forEachChild(
-                initializer,
-                child => visit(
-                    child,
-                    symbol.id,
-                    symbol.qualifiedName
-                )
-            );
-
+            ts.forEachChild(node.initializer, child => visit(child, symbol.id, symbol.qualifiedName));
             return;
         }
 
-        // 4. Methods
-        if (ts.isMethodDeclaration(node)) {
+        // Anonymous callbacks and function expressions not assigned directly to a variable.
+        if (isFunctionLikeExpression(node)) {
+            const location = getLocation(node, sourceFile);
+            const name = ts.isFunctionExpression(node) && node.name
+                ? node.name.text
+                : `<anonymous@${location.line}:${location.column}>`;
             const symbol = createSymbol(
-                getName(node.name),
-                "method",
-                filePath,
-                node,
-                sourceFile,
-                parentId,
-                parentQualifiedName,
-                false
+                name, "function", filePath, node, sourceFile,
+                parentId, parentQualifiedName, false
             );
-
             symbols.push(symbol);
-
-            ts.forEachChild(
-                node,
-                child => visit(
-                    child,
-                    symbol.id,
-                    symbol.qualifiedName
-                )
-            );
-
+            ts.forEachChild(node, child => visit(child, symbol.id, symbol.qualifiedName));
             return;
         }
 
-        // 5. Class properties
-        if (
-            ts.isPropertyDeclaration(node) &&
-            parentId !== null
-        ) {
+        if (ts.isPropertyDeclaration(node) && parentId !== null) {
             const symbol = createSymbol(
-                getName(node.name),
-                "property",
-                filePath,
-                node,
-                sourceFile,
-                parentId,
-                parentQualifiedName,
-                false
+                getName(node.name), "property", filePath, node, sourceFile,
+                parentId, parentQualifiedName, false
             );
-
             symbols.push(symbol);
-
             if (node.initializer) {
-                visit(
-                    node.initializer,
-                    symbol.id,
-                    symbol.qualifiedName
-                );
+                visit(node.initializer, symbol.id, symbol.qualifiedName);
             }
-
             return;
         }
 
-        ts.forEachChild(
-            node,
-            child => visit(
-                child,
-                parentId,
-                parentQualifiedName
-            )
-        );
+        ts.forEachChild(node, child => visit(child, parentId, parentQualifiedName));
     }
 
     visit(sourceFile);
-
     return symbols;
 }

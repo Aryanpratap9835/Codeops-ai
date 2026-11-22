@@ -1,4 +1,3 @@
-
 export interface SourceLocation {
     line: number;
     column: number;
@@ -6,11 +5,7 @@ export interface SourceLocation {
     end: number;
 }
 
-export type FunctionKind =
-    | "function"
-    | "arrow"
-    | "function-expression"
-    | "method";
+export type FunctionKind = "function" | "arrow" | "function-expression" | "method";
 
 export interface FunctionInfo {
     name: string;
@@ -35,11 +30,17 @@ export interface ClassInfo {
     exported: boolean;
 }
 
+export interface ImportBinding {
+    importedName: string;
+    localName: string;
+}
+
 export interface ImportInfo {
     moduleSpecifier: string;
     defaultImport: string | null;
     namespaceImport: string | null;
     namedImports: string[];
+    namedImportBindings?: ImportBinding[];
     isTypeOnly: boolean;
     location: SourceLocation;
 }
@@ -49,11 +50,19 @@ export interface ExportInfo {
     kind: string;
     isDefault: boolean;
     moduleSpecifier: string | null;
+    localName?: string | null;
     location: SourceLocation;
 }
 
+export type CalleeKind = "identifier" | "property" | "element" | "other";
+
 export interface CallInfo {
+    callerId: string | null;
+    callerName: string | null;
+    callerQualifiedName?: string | null;
     callee: string;
+    calleeKind: CalleeKind;
+    isOptional: boolean;
     location: SourceLocation;
 }
 
@@ -74,11 +83,7 @@ export interface ParseResult {
     errors: ParseError[];
 }
 
-export type SymbolKind =
-    | "function"
-    | "class"
-    | "method"
-    | "property";
+export type SymbolKind = "function" | "class" | "method" | "property";
 
 export interface SymbolInfo {
     id: string;
@@ -90,6 +95,7 @@ export interface SymbolInfo {
     exported: boolean;
     parentId: string | null;
 }
+
 export interface ParsedFile {
     filePath: string;
     functions: FunctionInfo[];
