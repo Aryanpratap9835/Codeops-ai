@@ -281,38 +281,119 @@ function resolveLocalIdentifier(
     return topLevel.length === 1 ? topLevel : candidates;
 }
 
-function findExportedSymbol(
+function findDirectlyExportedSymbols(
     file: ParsedFile,
     exportedName: string
 ): SymbolInfo[] {
-    const explicit = file.exports.filter(item =>
+    const matchingExports = file.exports.filter(item =>
+        item.moduleSpecifier === null &&
         item.name === exportedName &&
-        !item.moduleSpecifier &&
         item.localName
     );
 
-    const localNames = explicit.map(
+    const localNames = matchingExports.map(
         item => item.localName as string
     );
 
     return file.symbols.filter(symbol =>
-        (symbol.kind === "function" || symbol.kind === "method") &&
-        (symbol.exported || localNames.includes(symbol.name)) &&
         (
-            exportedName === "default"
-                ? (
-                    explicit.some(item =>
-                        item.isDefault &&
-                        item.localName === symbol.name
-                    ) ||
-                    (symbol.exported && symbol.name === "default")
-                )
-                : (
-                    symbol.name === exportedName ||
-                    localNames.includes(symbol.name)
-                )
+            symbol.kind === "function" ||
+            symbol.kind === "method"
+        ) &&
+        (
+            symbol.exported ||
+            localNames.includes(symbol.name)
+        ) &&
+        (
+            symbol.name === exportedName ||
+            localNames.includes(symbol.name)
         )
     );
+}
+
+function findExportedSymbols(
+    files: ParsedFile[],
+    file: ParsedFile,
+    exportedName: string,
+    moduleResolver: ModuleResolver,
+    visited: Set<string> = new Set()
+): SymbolInfo[] {
+    const visitKey = `${normalize(file.filePath)}:${exportedName}`;
+
+    if (visited.has(visitKey)) {
+        return [];
+    }
+
+    visited.add(visitKey);
+
+    const matches = new Map<string, SymbolInfo>();
+
+    // 1. Check symbols exported directly by this file.
+    for (const symbol of findDirectlyExportedSymbols(
+        file,
+        exportedName
+    )) {
+        matches.set(symbol.id, symbol);
+    }
+
+    // 2. Follow named re-exports and export * declarations.
+    for (const exportInfo of file.exports) {
+        if (!exportInfo.moduleSpecifier) {
+            continue;
+        }
+
+        let nextExportName: string | null = null;
+
+        if (
+            exportInfo.kind === "re-export" &&
+            exportInfo.name === exportedName
+        ) {
+            // export { originalName as publicName } from "./module"
+            nextExportName = exportInfo.localName ?? exportInfo.name;
+        } else if (
+            exportInfo.kind === "export-all" &&
+            exportedName !== "default"
+        ) {
+            // export * from "./module"
+            nextExportName = exportedName;
+        }
+
+        if (!nextExportName) {
+            continue;
+        }
+
+        const targetPath = moduleResolver.resolve(
+            file.filePath,
+            exportInfo.moduleSpecifier
+        );
+
+        if (!targetPath) {
+            continue;
+        }
+
+        const targetFile = files.find(
+            candidate =>
+                normalize(candidate.filePath) === targetPath
+        );
+
+        if (!targetFile) {
+            continue;
+        }
+
+        const resolved = findExportedSymbols(
+            files,
+            targetFile,
+            nextExportName,
+            moduleResolver,
+            visited
+        );
+
+        for (const symbol of resolved) {
+            matches.set(symbol.id, symbol);
+        }
+    }
+
+    return [...matches.values()];
 }
 
 function resolveImportedIdentifier(
@@ -321,10 +402,10 @@ function resolveImportedIdentifier(
     identifier: string,
     moduleResolver: ModuleResolver
 ): SymbolInfo[] {
-    const matches: SymbolInfo[] = [];
+    const matches = new Map<string, SymbolInfo>();
 
     for (const importInfo of callerFile.imports) {
-        if (importInfo.isTypeOnly) {
+        if (importInfo.isTypeOnly || importInfo.isDynamic) {
             continue;
         }
 
@@ -346,9 +427,14 @@ function resolveImportedIdentifier(
         }
 
         if (importInfo.defaultImport === identifier) {
-            matches.push(
-                ...findExportedSymbol(targetFile, "default")
-            );
+            for (const symbol of findExportedSymbols(
+                files,
+                targetFile,
+                "default",
+                moduleResolver
+            )) {
+                matches.set(symbol.id, symbol);
+            }
         }
 
         for (const binding of importInfo.namedImportBindings ?? []) {
@@ -356,17 +442,199 @@ function resolveImportedIdentifier(
                 continue;
             }
 
-            matches.push(
-                ...findExportedSymbol(
-                    targetFile,
-                    binding.importedName
-                )
-            );
+            for (const symbol of findExportedSymbols(
+                files,
+                targetFile,
+                binding.importedName,
+                moduleResolver
+            )) {
+                matches.set(symbol.id, symbol);
+            }
         }
     }
 
-    return matches;
+    return [...matches.values()];
 }
+function resolveNamespaceCall(
+    files: ParsedFile[],
+    callerFile: ParsedFile,
+    call: CallInfo,
+    moduleResolver: ModuleResolver
+): CallResolutionResult | null {
+    const parts = call.callee.split(".");
+
+    if (parts.length !== 2) {
+        return null;
+    }
+
+    const [namespaceName, memberName] = parts;
+
+    if (!namespaceName || !memberName) {
+        return null;
+    }
+
+    // 1. Direct namespace import: import * as ns from "./module"
+    for (const importInfo of callerFile.imports) {
+        if (importInfo.isTypeOnly || importInfo.isDynamic) {
+            continue;
+        }
+
+        if (importInfo.namespaceImport === namespaceName) {
+            const targetPath = moduleResolver.resolve(
+                callerFile.filePath,
+                importInfo.moduleSpecifier
+            );
+
+            if (!targetPath) {
+                return {
+                    targetId: null,
+                    resolution: "unresolved",
+                    reason: `Cannot resolve module path '${importInfo.moduleSpecifier}' for namespace '${namespaceName}'.`
+                };
+            }
+
+            const targetFile = files.find(
+                f => normalize(f.filePath) === targetPath
+            );
+
+            if (!targetFile) {
+                return {
+                    targetId: null,
+                    resolution: "unresolved",
+                    reason: `Resolved module file '${targetPath}' was not found in parsed files.`
+                };
+            }
+
+            const symbols = findExportedSymbols(
+                files,
+                targetFile,
+                memberName,
+                moduleResolver
+            );
+
+            if (symbols.length === 1) {
+                return {
+                    targetId: symbols[0]!.id,
+                    resolution: "resolved",
+                    reason: null
+                };
+            }
+
+            if (symbols.length > 1) {
+                return {
+                    targetId: null,
+                    resolution: "ambiguous",
+                    reason: `Multiple symbols match '${memberName}' on namespace '${namespaceName}'.`
+                };
+            }
+
+            return {
+                targetId: null,
+                resolution: "unresolved",
+                reason: `Symbol '${memberName}' is not exported by namespace '${namespaceName}' in '${targetFile.filePath}'.`
+            };
+        }
+
+        // 2. Named import matching a namespace re-export
+        for (const binding of importInfo.namedImportBindings ?? []) {
+            if (binding.localName !== namespaceName) {
+                continue;
+            }
+
+            const targetPath = moduleResolver.resolve(
+                callerFile.filePath,
+                importInfo.moduleSpecifier
+            );
+
+            if (!targetPath) {
+                continue;
+            }
+
+            const targetFile = files.find(
+                f => normalize(f.filePath) === targetPath
+            );
+
+            if (!targetFile) {
+                continue;
+            }
+
+            const nsExport = targetFile.exports.find(
+                exp =>
+                    exp.kind === "namespace-re-export" &&
+                    exp.name === binding.importedName &&
+                    exp.moduleSpecifier !== null
+            );
+
+            if (nsExport && nsExport.moduleSpecifier) {
+                const subTargetPath = moduleResolver.resolve(
+                    targetFile.filePath,
+                    nsExport.moduleSpecifier
+                );
+
+                if (subTargetPath) {
+                    const subTargetFile = files.find(
+                        f => normalize(f.filePath) === subTargetPath
+                    );
+
+                    if (subTargetFile) {
+                        const symbols = findExportedSymbols(
+                            files,
+                            subTargetFile,
+                            memberName,
+                            moduleResolver
+                        );
+
+                        if (symbols.length === 1) {
+                            return {
+                                targetId: symbols[0]!.id,
+                                resolution: "resolved",
+                                reason: null
+                            };
+                        }
+
+                        if (symbols.length > 1) {
+                            return {
+                                targetId: null,
+                                resolution: "ambiguous",
+                                reason: `Multiple symbols match '${memberName}' on namespace '${namespaceName}'.`
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Local class static method
+    const localClass = callerFile.symbols.find(
+        s => s.kind === "class" && s.name === namespaceName
+    );
+
+    if (localClass) {
+        const methods = callerFile.symbols.filter(
+            s => s.kind === "method" && s.parentId === localClass.id && s.name === memberName
+        );
+
+        if (methods.length === 1) {
+            return {
+                targetId: methods[0]!.id,
+                resolution: "resolved",
+                reason: null
+            };
+        }
+
+        if (methods.length > 1) {
+            return {
+                targetId: null,
+                resolution: "ambiguous",
+                reason: `Multiple matching methods '${memberName}' on class '${namespaceName}'.`
+            };
+        }
+    }
+
+    return null;
+}
+
 export function resolveCallTarget(
     files: ParsedFile[],
     callerFile: ParsedFile,
@@ -489,6 +757,17 @@ export function resolveCallTarget(
                     }
                 }
             }
+        }
+
+        const namespaceResult = resolveNamespaceCall(
+            files,
+            callerFile,
+            call,
+            moduleResolver
+        );
+
+        if (namespaceResult) {
+            return namespaceResult;
         }
 
         if (isKnownMethodCall(call)) {

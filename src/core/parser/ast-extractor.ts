@@ -113,85 +113,188 @@ function extractClasses(sourceFile: ts.SourceFile, classes: ClassInfo[]): void {
 }
 
 function extractImports(sourceFile: ts.SourceFile, imports: ImportInfo[]): void {
+    // 1. Static imports
     for (const statement of sourceFile.statements) {
-        if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
-        const clause = statement.importClause;
-        let defaultImport: string | null = null;
-        let namespaceImport: string | null = null;
-        const namedImportBindings: NonNullable<ImportInfo["namedImportBindings"]> = [];
+        if (ts.isImportDeclaration(statement) && ts.isStringLiteral(statement.moduleSpecifier)) {
+            const clause = statement.importClause;
+            let defaultImport: string | null = null;
+            let namespaceImport: string | null = null;
+            const namedImportBindings: NonNullable<ImportInfo["namedImportBindings"]> = [];
 
-        if (clause) {
-            defaultImport = clause.name?.text ?? null;
-            if (clause.namedBindings) {
-                if (ts.isNamespaceImport(clause.namedBindings)) {
-                    namespaceImport = clause.namedBindings.name.text;
-                } else {
-                    for (const element of clause.namedBindings.elements) {
-                        namedImportBindings.push({
-                            importedName: (element.propertyName ?? element.name).text,
-                            localName: element.name.text
-                        });
+            if (clause) {
+                defaultImport = clause.name?.text ?? null;
+                if (clause.namedBindings) {
+                    if (ts.isNamespaceImport(clause.namedBindings)) {
+                        namespaceImport = clause.namedBindings.name.text;
+                    } else {
+                        for (const element of clause.namedBindings.elements) {
+                            namedImportBindings.push({
+                                importedName: (element.propertyName ?? element.name).text,
+                                localName: element.name.text
+                            });
+                        }
                     }
                 }
             }
+
+            imports.push({
+                moduleSpecifier: statement.moduleSpecifier.text,
+                defaultImport,
+                namespaceImport,
+                namedImports: namedImportBindings.map(binding => binding.localName),
+                namedImportBindings,
+                isTypeOnly: clause?.isTypeOnly ?? false,
+                isDynamic: false,
+                location: getLocation(statement, sourceFile)
+            });
+            continue;
         }
 
-        imports.push({
-            moduleSpecifier: statement.moduleSpecifier.text,
-            defaultImport,
-            namespaceImport,
-            namedImports: namedImportBindings.map(binding => binding.localName),
-            namedImportBindings,
-            isTypeOnly: clause?.isTypeOnly ?? false,
-            location: getLocation(statement, sourceFile)
-        });
+        // CommonJS / TS: import x = require("./x")
+        if (ts.isImportEqualsDeclaration(statement)) {
+            if (
+                ts.isExternalModuleReference(statement.moduleReference) &&
+                ts.isStringLiteral(statement.moduleReference.expression)
+            ) {
+                imports.push({
+                    moduleSpecifier: statement.moduleReference.expression.text,
+                    defaultImport: statement.name.text,
+                    namespaceImport: null,
+                    namedImports: [],
+                    namedImportBindings: [],
+                    isTypeOnly: false,
+                    isDynamic: false,
+                    location: getLocation(statement, sourceFile)
+                });
+            }
+        }
     }
+
+    // 2. Dynamic imports: import("./module")
+    function findDynamicImports(node: ts.Node): void {
+        if (
+            ts.isCallExpression(node) &&
+            node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+            node.arguments.length > 0
+        ) {
+            const firstArg = node.arguments[0];
+            if (firstArg && ts.isStringLiteral(firstArg)) {
+                imports.push({
+                    moduleSpecifier: firstArg.text,
+                    defaultImport: null,
+                    namespaceImport: null,
+                    namedImports: [],
+                    namedImportBindings: [],
+                    isTypeOnly: false,
+                    isDynamic: true,
+                    location: getLocation(node, sourceFile)
+                });
+            }
+        }
+        ts.forEachChild(node, findDynamicImports);
+    }
+
+    findDynamicImports(sourceFile);
 }
 
-function extractExports(sourceFile: ts.SourceFile, exports: ExportInfo[]): void {
+function extractExports(
+    sourceFile: ts.SourceFile,
+    exports: ExportInfo[]
+): void {
     for (const statement of sourceFile.statements) {
         if (ts.isExportDeclaration(statement)) {
-            const moduleSpecifier = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)
-                ? statement.moduleSpecifier.text : null;
+            const moduleSpecifier =
+                statement.moduleSpecifier &&
+                    ts.isStringLiteral(statement.moduleSpecifier)
+                    ? statement.moduleSpecifier.text
+                    : null;
 
-            if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+            if (
+                statement.exportClause &&
+                ts.isNamedExports(statement.exportClause)
+            ) {
                 for (const element of statement.exportClause.elements) {
+                    const isDefault = element.name.text === "default";
                     exports.push({
                         name: element.name.text,
                         localName: (element.propertyName ?? element.name).text,
-                        kind: "re-export",
-                        isDefault: false,
+                        kind: moduleSpecifier ? "re-export" : "named-export",
+                        isDefault,
                         moduleSpecifier,
+                        isTypeOnly:
+                            statement.isTypeOnly || element.isTypeOnly,
                         location: getLocation(element, sourceFile)
                     });
                 }
+            } else if (
+                statement.exportClause &&
+                ts.isNamespaceExport(statement.exportClause)
+            ) {
+                exports.push({
+                    name: statement.exportClause.name.text,
+                    localName: "*",
+                    kind: "namespace-re-export",
+                    isDefault: false,
+                    moduleSpecifier,
+                    isTypeOnly: statement.isTypeOnly,
+                    location: getLocation(statement, sourceFile)
+                });
             } else {
                 exports.push({
-                    name: "*", localName: null, kind: "export-all",
-                    isDefault: false, moduleSpecifier, location: getLocation(statement, sourceFile)
+                    name: "*",
+                    localName: null,
+                    kind: "export-all",
+                    isDefault: false,
+                    moduleSpecifier,
+                    isTypeOnly: statement.isTypeOnly,
+                    location: getLocation(statement, sourceFile)
                 });
             }
+
             continue;
         }
 
         if (ts.isExportAssignment(statement)) {
             exports.push({
-                name: "default", localName: null, kind: "default-export",
-                isDefault: true, moduleSpecifier: null, location: getLocation(statement, sourceFile)
+                name: "default",
+                localName: ts.isIdentifier(statement.expression)
+                    ? statement.expression.text
+                    : null,
+                kind: "default-export",
+                isDefault: true,
+                moduleSpecifier: null,
+                isTypeOnly: false,
+                location: getLocation(statement, sourceFile)
             });
+
             continue;
         }
 
         if (hasExportModifier(statement)) {
-            const nameNode = "name" in statement ? (statement.name as ts.Node | undefined) : undefined;
-            const localName = nameNode ? getNodeName(nameNode) : null;
+            const isTypeOnly =
+                ts.isTypeAliasDeclaration(statement) ||
+                ts.isInterfaceDeclaration(statement);
+
+            const nameNode =
+                "name" in statement
+                    ? (statement.name as ts.Node | undefined)
+                    : undefined;
+
+            const localName = nameNode
+                ? getNodeName(nameNode)
+                : null;
+
             const isDefault = hasDefaultModifier(statement);
+
             exports.push({
-                name: isDefault ? "default" : (localName ?? "default"),
+                name: isDefault
+                    ? "default"
+                    : (localName ?? "default"),
                 localName,
                 kind: ts.SyntaxKind[statement.kind],
                 isDefault,
                 moduleSpecifier: null,
+                isTypeOnly,
                 location: getLocation(statement, sourceFile)
             });
         }
@@ -230,6 +333,12 @@ function extractCalls(sourceFile: ts.SourceFile, calls: CallInfo[], symbols: Sym
         }
 
         if (ts.isCallExpression(node)) {
+            // Dynamic import calls should not be captured as standard function calls
+            if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+                ts.forEachChild(node, child => visit(child, activeCaller));
+                return;
+            }
+
             calls.push({
                 callerId: activeCaller?.id ?? null,
                 callerName: activeCaller?.name ?? null,

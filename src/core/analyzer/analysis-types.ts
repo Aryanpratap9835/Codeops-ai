@@ -92,12 +92,21 @@ export interface FileRisk {
     circularDependency: boolean;
 }
 
+import type { ArchitectureReport } from "../architecture/architecture-types";
+import type { CouplingReport } from "../coupling/coupling-types";
+import type { DependencyHealthReport } from "../health/health-types";
+import type { HotspotReport } from "./hotspot-analyzer";
+
 export interface RepositoryAnalysis {
     metrics: RepositoryMetrics;
     semantic: SemanticAnalysis;
     deadCodeCandidates: DeadCodeCandidate[];
     risks: FileRisk[];
     findings: AnalysisFinding[];
+    architecture?: ArchitectureReport;
+    coupling?: CouplingReport;
+    dependencyHealth?: DependencyHealthReport;
+    hotspots?: HotspotReport;
     parseErrors: {
         filePath: string;
         code: string;

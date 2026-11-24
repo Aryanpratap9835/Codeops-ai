@@ -1,6 +1,12 @@
 
 
-import { GraphResult, ImpactReport } from "./graph-type";
+import {
+    GraphResult,
+    ImpactReport,
+    AdvancedImpactReport,
+    AffectedItemReason,
+    AffectedFunction
+} from "./graph-type";
 /**
  * Returns files that directly import the target file.
  */
@@ -176,6 +182,110 @@ export function getImpactReport(
         indirectDependents,
         allAffectedFiles,
         totalAffected: allAffectedFiles.length
+    };
+}
+
+/**
+ * Generates an advanced impact report with depth, explanations, and affected functions.
+ */
+export function getAdvancedImpactReport(
+    graph: GraphResult,
+    changedFile: string,
+    options?: {
+        callGraph?: import("../call-graph/call-graph-types").CallGraphResult;
+        targetSymbolName?: string;
+        highRiskFiles?: string[];
+    }
+): AdvancedImpactReport {
+    const base = getImpactReport(graph, changedFile);
+
+    const directSet = new Set(base.directDependents);
+
+    // Compute depth for each affected file using BFS from changedFile
+    const reverseAdjacency = new Map<string, string[]>();
+    for (const edge of graph.edges) {
+        const src = edge.source;
+        const tgt = edge.target;
+        if (!reverseAdjacency.has(tgt)) reverseAdjacency.set(tgt, []);
+        reverseAdjacency.get(tgt)!.push(src);
+    }
+
+    const depthMap = new Map<string, number>();
+    depthMap.set(changedFile, 0);
+
+    const queue: string[] = [changedFile];
+    let head = 0;
+
+    while (head < queue.length) {
+        const current = queue[head++];
+        const currentDepth = depthMap.get(current)!;
+
+        for (const neighbor of reverseAdjacency.get(current) ?? []) {
+            if (!depthMap.has(neighbor)) {
+                depthMap.set(neighbor, currentDepth + 1);
+                queue.push(neighbor);
+            }
+        }
+    }
+
+    let maxDepth = 0;
+    const explanations: AffectedItemReason[] = [];
+
+    for (const file of base.allAffectedFiles) {
+        const depth = depthMap.get(file) ?? 1;
+        if (depth > maxDepth) {
+            maxDepth = depth;
+        }
+
+        const relation = directSet.has(file) ? "direct-dependent" : "transitive-dependent";
+        const explanation = relation === "direct-dependent"
+            ? `Directly imports '${changedFile}'.`
+            : `Transitively depends on '${changedFile}' at depth ${depth}.`;
+
+        explanations.push({
+            filePath: file,
+            relation,
+            depth,
+            explanation
+        });
+    }
+
+    // Function-level impact if callGraph is provided
+    const affectedFunctions: AffectedFunction[] = [];
+    if (options?.callGraph) {
+        const callGraph = options.callGraph;
+        const targetNodes = callGraph.nodes.filter(n => n.filePath === changedFile);
+        const targetNodeIds = new Set(
+            options.targetSymbolName
+                ? targetNodes.filter(n => n.name === options.targetSymbolName).map(n => n.id)
+                : targetNodes.map(n => n.id)
+        );
+
+        for (const edge of callGraph.edges) {
+            if (edge.resolution === "resolved" && edge.target && targetNodeIds.has(edge.target)) {
+                const callerNode = callGraph.nodes.find(n => n.id === edge.source);
+                if (callerNode && callerNode.filePath !== changedFile) {
+                    affectedFunctions.push({
+                        functionId: callerNode.id,
+                        name: callerNode.name,
+                        filePath: callerNode.filePath,
+                        calleeName: edge.callee,
+                        explanation: `Function '${callerNode.name}' calls '${edge.callee}' in modified file.`
+                    });
+                }
+            }
+        }
+    }
+
+    const highRiskSet = new Set(options?.highRiskFiles ?? []);
+    const highRiskAffectedFiles = base.allAffectedFiles.filter(f => highRiskSet.has(f));
+
+    return {
+        ...base,
+        impactDepth: maxDepth,
+        affectedFunctions,
+        highRiskAffectedFiles,
+        explanations
     };
 }
 

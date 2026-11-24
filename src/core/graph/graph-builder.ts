@@ -1,4 +1,3 @@
-
 import * as path from "node:path";
 
 import { ParsedFile } from "../parser/parser-types";
@@ -16,14 +15,12 @@ export function buildDependencyGraph(
     const nodes: GraphNode[] = [];
     const edges: GraphEdge[] = [];
 
-    // Only successfully parsed files belong to this graph.
     const repositoryFiles = parsedFiles.map(
         file => normalizePath(file.filePath)
     );
 
     const knownFiles = new Set(repositoryFiles);
 
-    // Step 1: Create one node per parsed file.
     for (const filePath of repositoryFiles) {
         nodes.push({
             id: filePath,
@@ -32,31 +29,73 @@ export function buildDependencyGraph(
         });
     }
 
-    // Step 2: Resolve imports and create dependency edges.
+    const edgeIds = new Set<string>();
+
+    function addEdge(
+        source: string,
+        specifier: string,
+        kind: GraphEdge["kind"],
+        isTypeOnly: boolean,
+        index: number
+    ): void {
+        const target = resolveModule(
+            rootPath,
+            source,
+            specifier,
+            repositoryFiles
+        );
+
+        if (!target || !knownFiles.has(target)) {
+            return;
+        }
+
+        const id = `${source}->${target}:${kind}:${index}`;
+
+        if (edgeIds.has(id)) {
+            return;
+        }
+
+        edgeIds.add(id);
+
+        edges.push({
+            id,
+            source,
+            target,
+            kind,
+            specifier,
+            isTypeOnly
+        });
+    }
+
     for (const file of parsedFiles) {
         const source = normalizePath(file.filePath);
 
+        // Static imports and dynamic imports.
         file.imports.forEach((importInfo, index) => {
-            const target = resolveModule(
-                rootPath,
-                file.filePath,
+            addEdge(
+                source,
                 importInfo.moduleSpecifier,
-                repositoryFiles
+                importInfo.isDynamic
+                    ? "dynamic-imports"
+                    : "imports",
+                importInfo.isTypeOnly,
+                index
             );
+        });
 
-            // Ignore unresolved imports and external packages.
-            if (!target || !knownFiles.has(target)) {
+        // Re-exports are dependencies too.
+        file.exports.forEach((exportInfo, index) => {
+            if (!exportInfo.moduleSpecifier) {
                 return;
             }
 
-            edges.push({
-                id: `${source}->${target}:${index}`,
+            addEdge(
                 source,
-                target,
-                kind: "imports",
-                specifier: importInfo.moduleSpecifier,
-                isTypeOnly: importInfo.isTypeOnly
-            });
+                exportInfo.moduleSpecifier,
+                "re-exports",
+                exportInfo.isTypeOnly ?? false,
+                index
+            );
         });
     }
 

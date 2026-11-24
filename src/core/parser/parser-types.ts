@@ -43,6 +43,7 @@ export interface ImportInfo {
     namedImportBindings?: ImportBinding[];
     isTypeOnly: boolean;
     location: SourceLocation;
+    isDynamic?: boolean;
 }
 
 export interface ExportInfo {
@@ -52,6 +53,7 @@ export interface ExportInfo {
     moduleSpecifier: string | null;
     localName?: string | null;
     location: SourceLocation;
+    isTypeOnly?: boolean;
 }
 
 export type CalleeKind = "identifier" | "property" | "element" | "other";
