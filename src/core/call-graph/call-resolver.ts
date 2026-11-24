@@ -1,5 +1,9 @@
+
+
 import * as path from "node:path";
 
+import type { ModuleResolver } from "../graph/module-resolver";
+import { createModuleResolver } from "../graph/module-resolver";
 import type {
     CallInfo,
     ParsedFile,
@@ -14,57 +18,55 @@ const SOURCE_EXTENSIONS = [
 ];
 
 const GLOBAL_IDENTIFIERS = new Set([
-    "console",
-    "process",
-    "global",
-    "globalThis",
-    "window",
-    "document",
-    "navigator",
-    "location",
-    "Math",
-    "JSON",
-    "Date",
-    "Promise",
-    "Object",
-    "Array",
-    "String",
-    "Number",
-    "Boolean",
-    "BigInt",
-    "Symbol",
-    "Map",
-    "Set",
-    "WeakMap",
-    "WeakSet",
-    "Error",
-    "TypeError",
-    "RangeError",
-    "RegExp",
-    "Reflect",
-    "Proxy",
-    "Intl",
-    "Buffer",
-    "URL",
-    "URLSearchParams",
-    "AbortController",
-    "AbortSignal",
-    "Event",
-    "EventTarget",
-    "fetch",
-    "setTimeout",
-    "clearTimeout",
-    "setInterval",
-    "clearInterval",
-    "queueMicrotask",
-    "requestAnimationFrame",
+    "console", "process", "global", "globalThis",
+    "window", "document", "navigator", "location",
+    "Math", "JSON", "Date", "Promise", "Object",
+    "Array", "String", "Number", "Boolean", "BigInt",
+    "Symbol", "Map", "Set", "WeakMap", "WeakSet",
+    "Error", "TypeError", "RangeError", "RegExp",
+    "Reflect", "Proxy", "Intl", "Buffer", "URL",
+    "URLSearchParams", "AbortController", "AbortSignal",
+    "Event", "EventTarget", "fetch", "setTimeout",
+    "clearTimeout", "setInterval", "clearInterval",
+    "queueMicrotask", "requestAnimationFrame",
     "cancelAnimationFrame"
+]);
+
+// Heuristic classification only: these names commonly refer to
+// standard JavaScript methods, but receiver types are not verified.
+const BUILTIN_METHODS = new Set([
+    "map", "filter", "find", "findIndex", "some", "every",
+    "reduce", "reduceRight", "forEach", "sort", "reverse",
+    "includes", "indexOf", "lastIndexOf", "slice", "splice",
+    "concat", "flat", "flatMap", "join", "push", "pop",
+    "shift", "unshift", "at",
+    "startsWith", "endsWith", "trim", "trimStart", "trimEnd",
+    "toLowerCase", "toUpperCase", "replace", "replaceAll",
+    "split", "substring", "charAt",
+    "hasOwnProperty", "toString", "valueOf"
+]);
+
+// Common test-framework assertion methods, e.g. expect(value).toBe(...).
+const TEST_MATCHER_METHODS = new Set([
+    "toBe", "toEqual", "toStrictEqual", "toBeDefined",
+    "toBeUndefined", "toBeNull", "toBeTruthy", "toBeFalsy",
+    "toContain", "toHaveLength", "toHaveProperty",
+    "toThrow", "toMatch", "toMatchObject",
+    "toBeInstanceOf", "toBeGreaterThan", "toBeLessThan",
+    "toBeGreaterThanOrEqual", "toBeLessThanOrEqual",
+    "toHaveBeenCalled", "toHaveBeenCalledWith",
+    "toHaveBeenCalledTimes", "toHaveReturned"
 ]);
 
 function normalize(filePath: string): string {
     return path.posix
         .normalize(filePath.replace(/\\/g, "/"))
         .replace(/^\.\//, "");
+}
+
+function isExternalModuleSpecifier(specifier: string): boolean {
+    // Relative imports may point to files inside the analyzed repository.
+    return !specifier.startsWith(".");
 }
 
 function isExternalCall(call: CallInfo): boolean {
@@ -80,6 +82,76 @@ function isExternalCall(call: CallInfo): boolean {
     }
 
     return false;
+}
+
+function getCalleeRoot(callee: string): string | null {
+    const match = callee.match(/^[A-Za-z_$][\w$]*/);
+    return match?.[0] ?? null;
+}
+
+function getMethodName(callee: string): string {
+    const parts = callee.split(".");
+    return parts[parts.length - 1] ?? "";
+}
+
+function isImportedFromExternalModule(
+    file: ParsedFile,
+    call: CallInfo,
+    moduleResolver: ModuleResolver
+): boolean {
+    const root = getCalleeRoot(call.callee);
+
+    if (!root) {
+        return false;
+    }
+
+    for (const importInfo of file.imports) {
+        if (
+            importInfo.isTypeOnly ||
+            moduleResolver.isLocalSpecifier(
+                importInfo.moduleSpecifier
+            )
+        ) {
+            continue;
+        }
+
+        if (
+            call.calleeKind === "identifier" &&
+            (
+                importInfo.defaultImport === call.callee ||
+                importInfo.namedImportBindings?.some(
+                    binding => binding.localName === call.callee
+                )
+            )
+        ) {
+            return true;
+        }
+
+        if (
+            call.calleeKind === "property" &&
+            (
+                importInfo.namespaceImport === root ||
+                importInfo.defaultImport === root ||
+                importInfo.namedImportBindings?.some(
+                    binding => binding.localName === root
+                )
+            )
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+function isKnownMethodCall(call: CallInfo): boolean {
+    if (call.calleeKind !== "property") {
+        return false;
+    }
+
+    const methodName = getMethodName(call.callee);
+
+    return BUILTIN_METHODS.has(methodName) ||
+        TEST_MATCHER_METHODS.has(methodName);
 }
 
 function resolveModulePath(
@@ -178,7 +250,6 @@ function resolveLocalIdentifier(
         symbol.name === name
     );
 
-    // A top-level call can only directly resolve to a top-level symbol.
     if (!caller) {
         return candidates.filter(
             candidate => candidate.parentId === null
@@ -247,7 +318,8 @@ function findExportedSymbol(
 function resolveImportedIdentifier(
     files: ParsedFile[],
     callerFile: ParsedFile,
-    identifier: string
+    identifier: string,
+    moduleResolver: ModuleResolver
 ): SymbolInfo[] {
     const matches: SymbolInfo[] = [];
 
@@ -256,10 +328,17 @@ function resolveImportedIdentifier(
             continue;
         }
 
-        const targetFile = resolveModulePath(
+        const targetPath = moduleResolver.resolve(
             callerFile.filePath,
-            importInfo.moduleSpecifier,
-            files
+            importInfo.moduleSpecifier
+        );
+
+        if (!targetPath) {
+            continue;
+        }
+
+        const targetFile = files.find(
+            file => normalize(file.filePath) === targetPath
         );
 
         if (!targetFile) {
@@ -288,14 +367,16 @@ function resolveImportedIdentifier(
 
     return matches;
 }
-
 export function resolveCallTarget(
     files: ParsedFile[],
     callerFile: ParsedFile,
     caller: SymbolInfo | null,
-    call: CallInfo
+    call: CallInfo,
+    moduleResolver: ModuleResolver = createModuleResolver(
+        "",
+        files.map(f => f.filePath)
+    )
 ): CallResolutionResult {
-    // Recognize known runtime/global APIs before local resolution.
     if (isExternalCall(call)) {
         return {
             targetId: null,
@@ -330,7 +411,8 @@ export function resolveCallTarget(
         const imported = resolveImportedIdentifier(
             files,
             callerFile,
-            call.callee
+            call.callee,
+            moduleResolver
         );
 
         if (imported.length === 1) {
@@ -349,6 +431,14 @@ export function resolveCallTarget(
             };
         }
 
+        if (isImportedFromExternalModule(callerFile, call, moduleResolver)) {
+            return {
+                targetId: null,
+                resolution: "external",
+                reason: "Call targets a function imported from an external module."
+            };
+        }
+
         return {
             targetId: null,
             resolution: "unresolved",
@@ -357,6 +447,14 @@ export function resolveCallTarget(
     }
 
     if (call.calleeKind === "property") {
+        if (isImportedFromExternalModule(callerFile, call, moduleResolver)) {
+            return {
+                targetId: null,
+                resolution: "external",
+                reason: "Call targets an object or namespace imported from an external module."
+            };
+        }
+
         if (caller) {
             const parts = call.callee.split(".");
             const methodName = parts[parts.length - 1] ?? "";
@@ -391,6 +489,14 @@ export function resolveCallTarget(
                     }
                 }
             }
+        }
+
+        if (isKnownMethodCall(call)) {
+            return {
+                targetId: null,
+                resolution: "external",
+                reason: "Call uses a commonly known JavaScript or test-framework method; receiver type is not verified."
+            };
         }
 
         return {
